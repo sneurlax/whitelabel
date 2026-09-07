@@ -13,8 +13,8 @@ dart run bin/whitelabel.dart recover -p <project>
 ```
 
 Templates substitute `{{context:variable}}` tokens, where the context is one
-of `dart`, `json`, `yaml`, `xml`, or `text`. See `example/` for manifests and
-templates.
+of `dart`, `json`, `yaml`, `xml`, or `text`. See `example/` for manifests,
+templates, and an adapter that supplies generated files through the Dart API.
 
 ```sh
 dart analyze --fatal-infos

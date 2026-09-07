@@ -1,0 +1,11 @@
+schema_version: 1
+brand: sample_notes
+variables:
+  name: Example Notes
+  service_url: https://notes.example.com/api
+  features: [export]
+files:
+  - source: templates/pubspec.tmpl
+    destination: pubspec.yaml
+  - source: templates/main.tmpl
+    destination: bin/main.dart

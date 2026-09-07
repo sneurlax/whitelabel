@@ -1,0 +1,8 @@
+import 'dart:convert';
+import '../lib/settings.g.dart';
+
+void main() => print(jsonEncode({
+  'name': appName,
+  'service': serviceUrl,
+  'export': exportEnabled,
+}));
