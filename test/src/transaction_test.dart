@@ -343,6 +343,34 @@ void main(List<String> args) {
     expect(() => recoverConfiguration(f.project.path), throwsFormatException);
     expect(victim.readAsStringSync(), 'protected');
   });
+  test('another process cannot apply while the project is locked', () async {
+    f.output('.whitelabel/lock', '');
+    final lock = File(
+      p.join(f.project.path, '.whitelabel/lock'),
+    ).openSync(mode: FileMode.append);
+    lock.lockSync(FileLock.exclusive);
+    try {
+      final manifestPath = p.join(f.sources.path, 'brand.yaml');
+      File(manifestPath).writeAsStringSync(jsonEncode(f.data()));
+      final result = await Process.run(Platform.resolvedExecutable, [
+        p.absolute('bin/whitelabel.dart'),
+        'configure',
+        '-m',
+        manifestPath,
+        '-p',
+        f.project.path,
+      ]);
+      expect(result.exitCode, isNot(0), reason: result.stdout.toString());
+      expect(result.stderr.toString(), contains('project lock'));
+      expect(
+        File(p.join(f.project.path, 'lib/brand.g.dart')).existsSync(),
+        isFalse,
+      );
+    } finally {
+      lock.unlockSync();
+      lock.closeSync();
+    }
+  });
 }
 
 final class _FailCleanup extends IOOverrides {
