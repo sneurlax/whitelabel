@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
 
 import 'manifest.dart';
 import 'paths.dart';
@@ -70,6 +71,7 @@ class Configurator {
       ...stringMap(freezeValue(overrides), 'overrides'),
       'brand': manifest.brand,
     };
+    ensureNoTransaction(projectRoot);
     final beforeState = readFile(projectRoot, statePath);
     final inventory = readInventory(beforeState);
     final desired = <GeneratedFile>[];

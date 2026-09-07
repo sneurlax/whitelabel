@@ -1,6 +1,7 @@
 part of 'configurator.dart';
 
 const statePath = '.whitelabel/state.json';
+const transactionPath = '.whitelabel/transaction';
 
 String digest(List<int> bytes) => sha256.convert(bytes).toString();
 
@@ -179,7 +180,7 @@ class FileChange {
   }
 }
 
-/// A rendered plan.
+/// A rendered plan. Applying it fails if any file changed since planning.
 class ConfigurationPlan {
   ConfigurationPlan._(
     String projectRoot,
@@ -209,4 +210,347 @@ class ConfigurationPlan {
     'files': changes.map((change) => change.toJson()).toList(),
     'ownership_changes': _stateChange.action != 'unchanged',
   };
+
+  /// Applies the plan under the project lock. [onWrite] runs after each write;
+  /// if it throws, the transaction rolls back. If the process dies mid-apply,
+  /// call [recoverConfiguration] before planning again. File locks coordinate
+  /// processes, not isolates, so serialize calls within a process.
+  void apply({void Function(FileChange change)? onWrite}) {
+    withProjectLock(projectRoot, () {
+      ensureNoTransaction(projectRoot);
+      for (final change in [...changes, _stateChange]) {
+        if (!sameBytes(readFile(projectRoot, change.path), change.before) ||
+            change.beforeMode != null &&
+                fileMode(checkedPath(projectRoot, change.path)) !=
+                    change.beforeMode) {
+          throw StateError('Plan is stale: ${change.path} changed; plan again');
+        }
+      }
+      if (!hasChanges) return;
+      final writes = [
+        ...changes,
+        _stateChange,
+      ].where((change) => change.action != 'unchanged').toList();
+      final directory = Directory(checkedPath(projectRoot, transactionPath))
+        ..createSync();
+      final createdDirectories = <String>{};
+      try {
+        // Protect files whose confidentiality comes from their original parent.
+        setFileMode(directory.path, 0x1c0);
+        for (var i = 0; i < writes.length; i++) {
+          final change = writes[i];
+          var parent = p.posix.dirname(change.path);
+          while (parent != '.' && parent != '.whitelabel') {
+            final path = checkedPath(projectRoot, parent);
+            if (FileSystemEntity.typeSync(path, followLinks: false) ==
+                FileSystemEntityType.notFound) {
+              createdDirectories.add(parent);
+            }
+            parent = p.posix.dirname(parent);
+          }
+          if (change.before != null) {
+            final backup = File(
+              checkedPath(projectRoot, change.path),
+            ).copySync(p.join(directory.path, '$i.old'));
+            if (!sameBytes(backup.readAsBytesSync(), change.before)) {
+              throw StateError('File changed while staging: ${change.path}');
+            }
+          }
+          if (change.after != null) {
+            // Copy the backup first so the replacement keeps the file's mode.
+            final staged = change.before == null
+                ? File(p.join(directory.path, '$i.new'))
+                : File(
+                    p.join(directory.path, '$i.old'),
+                  ).copySync(p.join(directory.path, '$i.new'));
+            if (change.afterMode != null) {
+              // Create privately before writing bytes, including read-only copies.
+              staged.createSync();
+              setFileMode(staged.path, 0x180);
+            }
+            staged.writeAsBytesSync(change.after!, flush: true);
+            if (change.afterMode != null) {
+              setFileMode(staged.path, change.afterMode!);
+            }
+          }
+        }
+        // Nothing in the project is touched until the journal is durable.
+        final journal = {
+          'schema_version': 1,
+          'changes': writes.map((change) => change.toJson()).toList(),
+          'created_directories': createdDirectories.toList()..sort(),
+        };
+        File(
+          p.join(directory.path, 'journal.tmp'),
+        ).writeAsStringSync(jsonEncode(journal), flush: true);
+        File(
+          p.join(directory.path, 'journal.tmp'),
+        ).renameSync(p.join(directory.path, 'journal.json'));
+        for (var i = 0; i < writes.length; i++) {
+          final change = writes[i];
+          final path = checkedPath(projectRoot, change.path);
+          Directory(p.dirname(path)).createSync(recursive: true);
+          if (change.after == null) {
+            File(path).deleteSync();
+          } else {
+            _install(File(p.join(directory.path, '$i.new')), path);
+          }
+          onWrite?.call(change);
+        }
+        // Deleting the journal is the commit point. Before it, recovery rolls
+        // back; after it, only staging remains.
+        File(p.join(directory.path, 'journal.json')).deleteSync();
+      } catch (error) {
+        try {
+          _recover(projectRoot);
+        } catch (recoveryError) {
+          throw StateError(
+            'Apply failed: $error. Recovery also failed: '
+            '$recoveryError. Preserve .whitelabel and run recover.',
+          );
+        }
+        rethrow;
+      }
+      _discardStaging(projectRoot);
+    });
+  }
+}
+
+void _install(File staged, String destination) {
+  // Windows cannot rename over an existing file. The backup covers the gap
+  // between delete and rename.
+  if (File(destination).existsSync()) File(destination).deleteSync();
+  staged.renameSync(destination);
+}
+
+/// Rolls back an apply interrupted before commit. Every backup is verified
+/// first, and files edited after the interruption are left alone.
+void recoverConfiguration(String projectRoot) {
+  final root = canonicalDirectory(projectRoot);
+  withProjectLock(root, () => _recover(root));
+}
+
+void ensureNoTransaction(String root) {
+  final path = checkedPath(root, transactionPath);
+  if (FileSystemEntity.typeSync(path, followLinks: false) !=
+      FileSystemEntityType.notFound) {
+    throw StateError(
+      'An unfinished transaction exists; run whitelabel recover',
+    );
+  }
+}
+
+void _recover(String root) {
+  final path = checkedPath(root, transactionPath);
+  final type = FileSystemEntity.typeSync(path, followLinks: false);
+  if (type == FileSystemEntityType.notFound) return;
+  if (type != FileSystemEntityType.directory) {
+    throw FileSystemException(
+      'Transaction path is not a directory; remove it manually',
+      path,
+    );
+  }
+  // Also secure staging left by older versions before reading or restoring it.
+  setFileMode(path, 0x1c0);
+  final journalBytes = readFile(root, '$transactionPath/journal.json');
+  if (journalBytes == null) {
+    _discardStaging(root);
+    return;
+  }
+  final journal = stringMap(jsonDecode(utf8.decode(journalBytes)), 'journal');
+  checkKeys(journal, {
+    'schema_version',
+    'changes',
+    'created_directories',
+  }, 'journal');
+  if (journal['schema_version'] != 1 ||
+      journal['schema_version'] is! int ||
+      journal['changes'] is! List ||
+      journal['created_directories'] is! List) {
+    throw const FormatException('Invalid transaction journal');
+  }
+  final restores = <FileChange>[];
+  final changes = journal['changes'] as List;
+  for (var i = 0; i < changes.length; i++) {
+    final entry = stringMap(changes[i], 'journal entry');
+    checkKeys(entry, {
+      'path',
+      'action',
+      'before_sha256',
+      'after_sha256',
+      'before_mode',
+      'after_mode',
+    }, 'journal entry');
+    final path = requiredString(entry, 'path');
+    if (path != statePath) relativePath(path, output: true);
+    final beforeHash = entry['before_sha256'];
+    final afterHash = entry['after_sha256'];
+    final beforeMode = _readMode(entry['before_mode']);
+    final afterMode = _readMode(entry['after_mode']);
+    for (final hash in [beforeHash, afterHash]) {
+      if (hash != null &&
+          (hash is! String || !RegExp(r'^[a-f0-9]{64}$').hasMatch(hash))) {
+        throw const FormatException('Invalid journal digest');
+      }
+    }
+    final backup = beforeHash == null
+        ? null
+        : readFile(root, '$transactionPath/$i.old');
+    if (beforeHash != null &&
+        (backup == null ||
+            digest(backup) != beforeHash ||
+            beforeMode != null &&
+                !Platform.isWindows &&
+                fileMode(checkedPath(root, '$transactionPath/$i.old')) !=
+                    beforeMode)) {
+      throw StateError('Missing or corrupt backup for $path');
+    }
+    final current = readFile(root, path);
+    final currentHash = current == null ? null : digest(current);
+    if (currentHash != null &&
+        currentHash != beforeHash &&
+        currentHash != afterHash) {
+      throw StateError(
+        'File changed after interruption: $path; preserve it before recovery',
+      );
+    }
+    if (current != null &&
+        !Platform.isWindows &&
+        (beforeMode != null || afterMode != null)) {
+      final mode = fileMode(checkedPath(root, path));
+      if (mode != beforeMode && mode != afterMode) {
+        throw StateError('File permissions changed after interruption: $path');
+      }
+    }
+    restores.add(FileChange(path, current, backup));
+  }
+  checkCollisions(restores.map((change) => change.path));
+  final createdDirectories = (journal['created_directories'] as List).map((
+    item,
+  ) {
+    if (item is! String) {
+      throw const FormatException('Invalid journal directory');
+    }
+    relativePath(item, output: true);
+    checkedPath(root, item);
+    return item;
+  }).toList()..sort((a, b) => b.length.compareTo(a.length));
+  final directoryModes = <String, int>{};
+  try {
+    for (final relative in createdDirectories.reversed) {
+      final path = checkedPath(root, relative);
+      if (Directory(path).existsSync()) {
+        final mode = fileMode(path);
+        if (mode != null && mode & 0x1c0 != 0x1c0) {
+          directoryModes[relative] = mode;
+          setFileMode(path, mode | 0x1c0);
+        }
+      }
+    }
+    for (var i = restores.length - 1; i >= 0; i--) {
+      final change = restores[i];
+      final path = checkedPath(root, change.path);
+      // No write is needed for entries that were never installed or were already
+      // restored. This also avoids touching unchanged files in read-only parents.
+      if (sameBytes(change.before, change.after) &&
+          (change.after == null ||
+              Platform.isWindows ||
+              fileMode(path) ==
+                  fileMode(checkedPath(root, '$transactionPath/$i.old')))) {
+        continue;
+      }
+      if (change.after == null) {
+        if (File(path).existsSync()) File(path).deleteSync();
+      } else {
+        Directory(p.dirname(path)).createSync(recursive: true);
+        final temporary = File(
+          checkedPath(root, '$transactionPath/restore.tmp'),
+        );
+        // A previous recovery may have stopped after copying a read-only backup.
+        // Recreate this scratch file rather than truncating its old permissions.
+        if (temporary.existsSync()) temporary.deleteSync();
+        final staged = File(
+          checkedPath(root, '$transactionPath/$i.old'),
+        ).copySync(temporary.path);
+        _install(staged, path);
+      }
+    }
+    for (final relative in createdDirectories) {
+      final directory = Directory(checkedPath(root, relative));
+      if (directory.existsSync() &&
+          directory.listSync(followLinks: false).isEmpty) {
+        directory.deleteSync();
+      }
+    }
+  } finally {
+    // A directory containing unrelated files is retained with its old mode.
+    for (final entry in directoryModes.entries.toList().reversed) {
+      final path = checkedPath(root, entry.key);
+      if (Directory(path).existsSync()) setFileMode(path, entry.value);
+    }
+  }
+  // Validate before retiring the journal, so stray entries remain retryable.
+  // Once rollback is complete, cleanup must not depend on surviving backups.
+  final directory = Directory(checkedPath(root, transactionPath));
+  _validateStaging(directory);
+  File(
+    checkedPath(root, '$transactionPath/journal.json'),
+  ).renameSync(checkedPath(root, '$transactionPath/rollback-complete.json'));
+  _discardStaging(root);
+}
+
+void _discardStaging(String root) {
+  final directory = Directory(checkedPath(root, transactionPath));
+  if (!directory.existsSync()) return;
+  _validateStaging(directory);
+  directory.deleteSync(recursive: true);
+}
+
+void _validateStaging(Directory directory) {
+  // Delete through plain files only.
+  for (final entity in directory.listSync(followLinks: false)) {
+    if (FileSystemEntity.typeSync(entity.path, followLinks: false) !=
+        FileSystemEntityType.file) {
+      throw FileSystemException('Unexpected transaction entry', entity.path);
+    }
+  }
+}
+
+final _activeLocks = <String>{};
+
+void withProjectLock(String root, void Function() action) {
+  if (!_activeLocks.add(root)) {
+    throw StateError('Configuration is already active for $root');
+  }
+  try {
+    _withFileLock(root, action);
+  } finally {
+    _activeLocks.remove(root);
+  }
+}
+
+void _withFileLock(String root, void Function() action) {
+  final stateDirectory = Directory(checkedPath(root, '.whitelabel'));
+  stateDirectory.createSync();
+  final lockPath = checkedPath(root, '.whitelabel/lock');
+  final lockType = FileSystemEntity.typeSync(lockPath, followLinks: false);
+  if (lockType != FileSystemEntityType.file &&
+      lockType != FileSystemEntityType.notFound) {
+    throw FileSystemException('Invalid project lock', lockPath);
+  }
+  final lock = File(lockPath).openSync(mode: FileMode.append);
+  try {
+    try {
+      lock.lockSync(FileLock.exclusive);
+    } on FileSystemException {
+      throw StateError('Another whitelabel run holds the project lock');
+    }
+    try {
+      action();
+    } finally {
+      lock.unlockSync();
+    }
+  } finally {
+    lock.closeSync();
+  }
 }
