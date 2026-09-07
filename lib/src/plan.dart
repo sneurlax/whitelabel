@@ -180,18 +180,45 @@ class FileChange {
   }
 }
 
+/// A copied directory. Existing directories are checked, never chmodded.
+/// Directories remain after their owned files are pruned, like implicit parents.
+class DirectoryChange {
+  DirectoryChange._(this.path, this.existed, this.mode);
+
+  final String path;
+  final bool existed;
+  final int? mode;
+
+  String get action => existed ? 'unchanged' : 'create';
+  Map<String, Object?> toJson() => {
+    'path': path,
+    'action': action,
+    if (mode != null) 'mode': mode,
+  };
+  String get diff => existed
+      ? ''
+      : 'Create directory $path'
+            '${mode == null ? '' : ' (mode ${mode!.toRadixString(8).padLeft(4, '0')})'}\n';
+}
+
 /// A rendered plan. Applying it fails if any file changed since planning.
 class ConfigurationPlan {
   ConfigurationPlan._(
     String projectRoot,
     List<FileChange> changes,
+    List<DirectoryChange> directories,
     this._stateChange,
   ) : projectRoot = canonicalDirectory(projectRoot),
-      changes = List.unmodifiable(changes) {
+      changes = List.unmodifiable(changes),
+      directories = List.unmodifiable(directories) {
     for (final change in changes) {
       relativePath(change.path, output: true);
     }
     checkCollisions(changes.map((change) => change.path));
+    checkDirectoryCollisions(
+      changes.map((change) => change.path),
+      directories.map((directory) => directory.path),
+    );
     if (_stateChange.path != statePath) {
       throw const FormatException('Invalid ownership state destination');
     }
@@ -199,15 +226,18 @@ class ConfigurationPlan {
 
   final String projectRoot;
   final List<FileChange> changes;
+  final List<DirectoryChange> directories;
   final FileChange _stateChange;
 
   bool get hasChanges =>
+      directories.any((directory) => !directory.existed) ||
       changes.any((change) => change.action != 'unchanged') ||
       _stateChange.action != 'unchanged';
 
   Map<String, Object?> toJson() => {
     'project': projectRoot,
     'files': changes.map((change) => change.toJson()).toList(),
+    'directories': directories.map((directory) => directory.toJson()).toList(),
     'ownership_changes': _stateChange.action != 'unchanged',
   };
 
@@ -226,6 +256,21 @@ class ConfigurationPlan {
           throw StateError('Plan is stale: ${change.path} changed; plan again');
         }
       }
+      for (final directory in directories) {
+        final path = checkedPath(projectRoot, directory.path);
+        final type = FileSystemEntity.typeSync(path, followLinks: false);
+        if (type !=
+                (directory.existed
+                    ? FileSystemEntityType.directory
+                    : FileSystemEntityType.notFound) ||
+            directory.existed &&
+                directory.mode != null &&
+                fileMode(path) != directory.mode) {
+          throw StateError(
+            'Plan is stale: directory ${directory.path} changed',
+          );
+        }
+      }
       if (!hasChanges) return;
       final writes = [
         ...changes,
@@ -237,6 +282,15 @@ class ConfigurationPlan {
       try {
         // Protect files whose confidentiality comes from their original parent.
         setFileMode(directory.path, 0x1c0);
+        for (final copied in directories.where((entry) => !entry.existed)) {
+          var parent = copied.path;
+          while (parent != '.') {
+            if (!Directory(checkedPath(projectRoot, parent)).existsSync()) {
+              createdDirectories.add(parent);
+            }
+            parent = p.posix.dirname(parent);
+          }
+        }
         for (var i = 0; i < writes.length; i++) {
           final change = writes[i];
           var parent = p.posix.dirname(change.path);
@@ -286,6 +340,13 @@ class ConfigurationPlan {
         File(
           p.join(directory.path, 'journal.tmp'),
         ).renameSync(p.join(directory.path, 'journal.json'));
+        // Create copied directories before installing any contents. Temporary
+        // owner access permits installing into read-only source directories.
+        for (final copied in directories.where((entry) => !entry.existed)) {
+          final path = checkedPath(projectRoot, copied.path);
+          Directory(path).createSync(recursive: true);
+          if (copied.mode != null) setFileMode(path, copied.mode! | 0x1c0);
+        }
         for (var i = 0; i < writes.length; i++) {
           final change = writes[i];
           final path = checkedPath(projectRoot, change.path);
@@ -296,6 +357,13 @@ class ConfigurationPlan {
             _install(File(p.join(directory.path, '$i.new')), path);
           }
           onWrite?.call(change);
+        }
+        for (final copied in directories.reversed.where(
+          (entry) => !entry.existed,
+        )) {
+          if (copied.mode != null) {
+            setFileMode(checkedPath(projectRoot, copied.path), copied.mode!);
+          }
         }
         // Deleting the journal is the commit point. Before it, recovery rolls
         // back; after it, only staging remains.

@@ -90,6 +90,34 @@ void checkCollisions(Iterable<String> paths) {
   }
 }
 
+/// Directories can contain outputs, but cannot be outputs of file entries.
+void checkDirectoryCollisions(
+  Iterable<String> files,
+  Iterable<String> directories,
+) {
+  final fileNames = <String>{};
+  final directorySpellings = <String, String>{};
+  for (final file in files) {
+    fileNames.add(file.toLowerCase());
+    _checkDirectoryCase(file, directorySpellings);
+  }
+  final directoryNames = <String>{};
+  for (final directory in directories) {
+    relativePath(directory, output: true);
+    _checkDirectoryCase(directory, directorySpellings, includeLeaf: true);
+    final normalized = directory.toLowerCase();
+    if (!directoryNames.add(normalized)) {
+      throw StateError('Directory collision: $directory');
+    }
+    final parts = normalized.split('/');
+    for (var i = 1; i <= parts.length; i++) {
+      if (fileNames.contains(parts.take(i).join('/'))) {
+        throw StateError('Output is both a file and a directory: $directory');
+      }
+    }
+  }
+}
+
 // Register every parent, including implicit ones, with its original spelling.
 // Sharing the same spelling is fine; aliasing it by case is host-dependent.
 void _checkDirectoryCase(
