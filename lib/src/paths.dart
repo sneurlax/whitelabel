@@ -72,7 +72,9 @@ String checkedPath(String root, String relative) {
 
 void checkCollisions(Iterable<String> paths) {
   final entries = <String>{};
+  final directorySpellings = <String, String>{};
   for (final path in paths) {
+    _checkDirectoryCase(path, directorySpellings);
     final normalized = path.toLowerCase();
     if (!entries.add(normalized)) {
       throw StateError('Output collision: $path');
@@ -85,5 +87,25 @@ void checkCollisions(Iterable<String> paths) {
         throw StateError('Output is both a file and a directory: $path');
       }
     }
+  }
+}
+
+// Register every parent, including implicit ones, with its original spelling.
+// Sharing the same spelling is fine; aliasing it by case is host-dependent.
+void _checkDirectoryCase(
+  String path,
+  Map<String, String> spellings, {
+  bool includeLeaf = false,
+}) {
+  final parts = path.split('/');
+  final count = parts.length - (includeLeaf ? 0 : 1);
+  for (var i = 1; i <= count; i++) {
+    final directory = parts.take(i).join('/');
+    final key = directory.toLowerCase();
+    final previous = spellings[key];
+    if (previous != null && previous != directory) {
+      throw StateError('Directory case collision: $previous and $directory');
+    }
+    spellings[key] = directory;
   }
 }
