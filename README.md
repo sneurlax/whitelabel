@@ -35,3 +35,8 @@ changes an existing directory's permissions. Copied directories remain after
 obsolete owned files are pruned, just like implicit parent directories. Plans
 expose copied directories in `directories`, separately from file changes.
 Output paths must use consistent directory casing, including shared parents.
+
+The verifier accepts `--reproducible`, `--aot`, and `--report <path>` in addition
+to its Flutter options. Reports are created exclusively after verification;
+existing files are never replaced. If writing a report fails, a partial report
+may remain for inspection.
