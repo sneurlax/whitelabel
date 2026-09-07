@@ -108,6 +108,75 @@ class FileChange {
     if (beforeMode != null) 'before_mode': beforeMode,
     if (afterMode != null) 'after_mode': afterMode,
   };
+
+  /// A whole-file unified diff. Binary files are named, not dumped.
+  String get diff {
+    if (action == 'unchanged') return '';
+    String mode(int? value) =>
+        value == null ? 'default' : value.toRadixString(8).padLeft(4, '0');
+    final permissionDiff = beforeMode == afterMode
+        ? ''
+        : 'File permissions $path: ${mode(beforeMode)} -> ${mode(afterMode)}\n';
+    if (sameBytes(before, after)) return permissionDiff;
+    String decode(List<int>? bytes) {
+      final text = utf8.decode(bytes ?? []);
+      if (text.contains('\x00')) throw const FormatException('Binary file');
+      return text;
+    }
+
+    try {
+      final oldText = decode(before);
+      final newText = decode(after);
+      List<String> lines(String text) {
+        if (text.isEmpty) return [];
+        final result = text.split('\n');
+        if (text.endsWith('\n')) result.removeLast();
+        return result;
+      }
+
+      String gitMode(int? mode) =>
+          (mode ?? 0) & 0x49 == 0 ? '100644' : '100755';
+      // Every textual entry needs a Git header: otherwise a following unified
+      // diff can be parsed as part of an empty-file entry's extended metadata.
+      final result = StringBuffer(permissionDiff)
+        ..writeln(
+          'diff --git ${jsonEncode('a/$path')} ${jsonEncode('b/$path')}',
+        );
+      if (before == null) {
+        result.writeln('new file mode ${gitMode(afterMode)}');
+      } else if (after == null) {
+        result.writeln('deleted file mode ${gitMode(beforeMode)}');
+      } else if (gitMode(beforeMode) != gitMode(afterMode)) {
+        result
+          ..writeln('old mode ${gitMode(beforeMode)}')
+          ..writeln('new mode ${gitMode(afterMode)}');
+      }
+      if (oldText.isEmpty && newText.isEmpty) return result.toString();
+      final oldLines = lines(oldText);
+      final newLines = lines(newText);
+      result
+        ..writeln('--- ${before == null ? '/dev/null' : 'a/$path'}')
+        ..writeln('+++ ${after == null ? '/dev/null' : 'b/$path'}')
+        ..writeln(
+          '@@ -${oldLines.isEmpty ? 0 : 1},${oldLines.length} '
+          '+${newLines.isEmpty ? 0 : 1},${newLines.length} @@',
+        );
+      for (final (lines, prefix, text) in [
+        (oldLines, '-', oldText),
+        (newLines, '+', newText),
+      ]) {
+        for (final line in lines) {
+          result.writeln('$prefix$line');
+        }
+        if (lines.isNotEmpty && !text.endsWith('\n')) {
+          result.writeln(r'\ No newline at end of file');
+        }
+      }
+      return result.toString();
+    } on FormatException {
+      return '${permissionDiff}Binary file $path: $action\n';
+    }
+  }
 }
 
 /// A rendered plan.

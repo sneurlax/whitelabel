@@ -13,6 +13,7 @@ void main() {
   test('plan writes nothing', () {
     final plan = f.configurator().plan();
     expect(plan.changes.single.action, 'create');
+    expect(plan.changes.single.diff, contains('+const name = "Example";'));
     expect(f.project.listSync(), isEmpty);
   });
   test('a missing template leaves outputs untouched', () {
