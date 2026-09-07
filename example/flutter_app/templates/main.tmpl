@@ -1,0 +1,19 @@
+import 'package:flutter/material.dart';
+import 'branding.g.dart';
+
+void main() => runApp(const NotesApp());
+
+class NotesApp extends StatelessWidget {
+  const NotesApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: name,
+      home: Scaffold(
+        appBar: AppBar(title: Text(name)),
+        body: Center(child: Text(greeting)),
+      ),
+    );
+  }
+}

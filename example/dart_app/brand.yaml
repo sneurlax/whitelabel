@@ -1,0 +1,12 @@
+schema_version: 1
+brand: sample_cli
+variables:
+  name: Sample Notes
+  greeting: 'Your notes, "your" way. $0 to start.'
+files:
+  - source: templates/pubspec.tmpl
+    destination: pubspec.yaml
+  - source: templates/main.tmpl
+    destination: bin/main.dart
+  - source: templates/branding.tmpl
+    destination: lib/branding.g.dart

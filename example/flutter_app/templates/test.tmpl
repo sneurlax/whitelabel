@@ -1,0 +1,11 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:sample_notes/branding.g.dart';
+import 'package:sample_notes/main.dart';
+
+void main() {
+  testWidgets('uses the generated brand values', (tester) async {
+    await tester.pumpWidget(const NotesApp());
+    expect(find.text(name), findsOneWidget);
+    expect(find.text(greeting), findsOneWidget);
+  });
+}

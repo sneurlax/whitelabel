@@ -1,0 +1,15 @@
+schema_version: 1
+brand: sample_notes
+platforms: [android, ios, linux, macos, web, windows]
+variables:
+  name: Sample Notes
+  greeting: 'A place for "your" ideas & plans.'
+files:
+  - source: templates/pubspec.tmpl
+    destination: pubspec.yaml
+  - source: templates/main.tmpl
+    destination: lib/main.dart
+  - source: templates/branding.tmpl
+    destination: lib/branding.g.dart
+  - source: templates/test.tmpl
+    destination: test/branding_test.dart

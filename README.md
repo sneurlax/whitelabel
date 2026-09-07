@@ -5,6 +5,23 @@ brand, its variables, and the files to render or copy into a project. The
 tool plans every output, then applies the plan with ownership tracking and
 rollback.
 
+```sh
+dart pub get
+dart run bin/whitelabel.dart plan -m example/dart_app/brand.yaml -p <project> --diff
+dart run bin/whitelabel.dart configure -m example/dart_app/brand.yaml -p <project>
+dart run bin/whitelabel.dart recover -p <project>
+```
+
+Templates substitute `{{context:variable}}` tokens, where the context is one
+of `dart`, `json`, `yaml`, `xml`, or `text`. See `example/` for manifests and
+templates.
+
+```sh
+dart analyze --fatal-infos
+dart test
+dart run tool/verify_examples.dart [--flutter [--build]]
+```
+
 Copy entries preserve ordinary POSIX file permissions, including executable and
 private-file bits; Windows uses its normal file permissions. File permission-only
 changes appear in plans, and manual file permission edits require `--overwrite`.
